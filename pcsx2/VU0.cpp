@@ -17,6 +17,9 @@
 #include "VUmicro.h"
 #include "Vif_Dma.h"
 #include "MTVU.h"
+#include "VMManager.h"
+#include "DebugTools/VUBreakpoints.h"
+#include <atomic>
 
 #define _Ft_ _Rt_
 #define _Fs_ _Rd_
@@ -45,6 +48,15 @@ __fi void _vu0run(bool breakOnMbit, bool addCycles, bool sync_only) {
 
 	if (!(VU0.VI[REG_VPU_STAT].UL & 1)) return;
 
+	// PCSX2-MCP DEBUG: per-call instrumentation for the VU0-breakpoint freeze
+	// investigation. Cheap (once per _vu0run call, not per VU instruction).
+	// Remove once resolved.
+	static std::atomic<u64> s_debug_call_count{0};
+	const u64 debug_call_id = s_debug_call_count.fetch_add(1, std::memory_order_relaxed);
+	const bool debug_is_interpreter = (CpuVU0 == static_cast<BaseVUmicroCPU*>(&CpuIntVU0));
+	const u32 debug_start_tpc = VU0.VI[REG_TPC].UL;
+	u32 debug_iterations = 0;
+
 	//VU0 is ahead of the EE and M-Bit is already encountered, so no need to wait for it, just catch up the EE
 	if ((VU0.flags & VUFLAG_MFLAGSET) && breakOnMbit && (s64)(cpuRegs.cycle - VU0.cycle) <= 0)
 	{
@@ -66,15 +78,97 @@ __fi void _vu0run(bool breakOnMbit, bool addCycles, bool sync_only) {
 			return;
 	}
 
+	// PCSX2-MCP DEBUG: dump the exact call-time state right before we hand
+	// off to the interpreter, so we can see what runCycles/sync_only/the
+	// VU0.cycle-vs-cpuRegs.cycle gap actually are for a call that goes on
+	// to become one of the long-running ones - the heartbeat log inside
+	// Execute() shows a "cycles" bound that doesn't match the fixed
+	// 0x7fffffff we'd expect for the non-sync_only path, so something here
+	// needs directly observing rather than inferring from source. Remove
+	// once resolved.
+	if (sync_only || runCycles != 0x7fffffff || (s64)(cpuRegs.cycle - VU0.cycle) > 1000000)
+	{
+		Console.WriteLnFmt("[PCSX2-MCP DEBUG] _vu0run #{}: ANOMALOUS pre-Execute runCycles={}, sync_only={}, breakOnMbit={}, addCycles={}, VU0.cycle={}, cpuRegs.cycle={}, gap={}, VIBackupCycles={}",
+			debug_call_id, runCycles, sync_only, breakOnMbit, addCycles, VU0.cycle, cpuRegs.cycle,
+			(s64)(cpuRegs.cycle - VU0.cycle), VU0.VIBackupCycles);
+	}
+
 	do { // Run VU until it finishes or M-Bit
 		CpuVU0->Execute(runCycles);
+		debug_iterations++;
+
+		// A VU0 breakpoint (VUBreakpoints.h) can only be detected from inside
+		// CpuVU0->Execute() (the interpreter's own per-instruction loop), which
+		// just returned to us here. It deliberately did NOT act on it beyond
+		// breaking out of its own loop - see the comment in
+		// VU0microInterp.cpp's InterpVU0::Execute() for why. We're now back in
+		// the caller's frame, past that function's RAII guards, so this is the
+		// first safe place to actually pause: stop the do-while from re-running
+		// Execute() at the exact same (unadvanced) TPC - which would otherwise
+		// spin as fast as the CPU can go, repeatedly re-triggering the same
+		// breakpoint - and unwind the EE recompiler's call stack the same way
+		// an EE-side breakpoint hit does (see recError() etc. in iR5900.cpp),
+		// so PCSX2's own pause machinery (MTGS sync, Host::OnVMPaused(), and
+		// critically the CPU thread's own event loop that services DebugServer
+		// commands including resume) actually takes over instead of silently
+		// falling back into more EE code as if nothing happened.
+		if (VUBreakpoints::WasTriggered())
+			break;
 	} while ((VU0.VI[REG_VPU_STAT].UL & 1)						// E-bit Termination
 	  &&	!sync_only && (!breakOnMbit || (!(VU0.flags & VUFLAG_MFLAGSET) && (s32)(cpuRegs.cycle - VU0.cycle) > 0)));	// M-bit Break
+
+	if (VUBreakpoints::WasTriggered())
+	{
+		VUBreakpoints::ClearTriggered();
+		VMManager::SetPaused(true);
+		Console.WriteLnFmt("[PCSX2-MCP DEBUG] _vu0run #{}: VU breakpoint pause fired (backend={}, startTPC=0x{:04X}, iterations={})",
+			debug_call_id, debug_is_interpreter ? "interp" : "recomp", debug_start_tpc, debug_iterations);
+		// Deliberately NOT calling Cpu->ExitExecution() here. That forces an
+		// immediate fastjmp-based unwind of the EE recompiler's dispatch loop,
+		// which is only meant to be triggered from the recompiler's own
+		// designated call sites (recError() etc. in iR5900.cpp) that pair it
+		// with their own internal exit-state bookkeeping. Called from here -
+		// a VU-interpreter-driven call chain the recompiler wasn't written to
+		// expect - it left that bookkeeping in a state where every subsequent
+		// block re-exits immediately forever (confirmed by testing: game
+		// freezes permanently after the first VU breakpoint pause/resume
+		// cycle, survives toggling the VU0 recompiler setting and manual
+		// pause/unpause). We don't need it anyway: the do-while break above
+		// already fixes the actual livelock (no more re-entering Execute() at
+		// the same unadvanced TPC), and a single SetPaused(true) call is
+		// picked up shortly after by the EE recompiler's own existing periodic
+		// checkpoint - the same one the normal UI Pause button already relies
+		// on - without needing to force anything.
+	}
+
+	// PCSX2-MCP DEBUG: log the tail end of this call whenever it took an
+	// unusual number of do-while iterations (>1000) or more than ~1/10th of a
+	// PS2 EE-second of VU0 cycles in one go - either would be a strong signal
+	// this call, not the surrounding infra, is where time is disappearing.
+	// PCSX2-MCP FIX: same u64-underflow issue as the cpuRegs.cycle catch-up
+	// above - use the signed delta so a no-progress call (VU0.cycle behind
+	// startcycle) reads as a small/negative number instead of a bogus huge
+	// one that made this fire as a false "SLOW CALL" on nearly every hit.
+	const s64 debug_cycles_consumed = static_cast<s64>(VU0.cycle - startcycle);
+	if (debug_iterations > 1000 || debug_cycles_consumed > 29491200ll)
+	{
+		Console.WriteLnFmt("[PCSX2-MCP DEBUG] _vu0run #{}: SLOW CALL (backend={}, startTPC=0x{:04X}, endTPC=0x{:04X}, iterations={}, cyclesConsumed={}, stillRunning={})",
+			debug_call_id, debug_is_interpreter ? "interp" : "recomp", debug_start_tpc, VU0.VI[REG_TPC].UL, debug_iterations, debug_cycles_consumed,
+			(VU0.VI[REG_VPU_STAT].UL & 1) != 0);
+	}
 
 	// Add cycles if called from EE's COP2
 	if (addCycles)
 	{
-		cpuRegs.cycle += (VU0.cycle - startcycle);
+		// PCSX2-MCP FIX: (VU0.cycle - startcycle) is a u64 subtraction - if a VU
+		// breakpoint caused this call (or a recent prior one) to bail out before
+		// VU0.cycle made real progress, VU0.cycle can end up behind startcycle,
+		// underflowing to a huge value and corrupting cpuRegs.cycle (which the
+		// whole event-scheduling/pause-checkpoint system is driven off of).
+		// Cast through s64 to recover the true signed delta and clamp negative
+		// (no-progress) cases to 0 instead of adding a huge wrapped number.
+		const s64 vu0_cycle_delta = static_cast<s64>(VU0.cycle - startcycle);
+		cpuRegs.cycle += (vu0_cycle_delta > 0) ? static_cast<u64>(vu0_cycle_delta) : 0;
 		CpuVU1->ExecuteBlock(0); // Catch up VU1 as it's likely fallen behind
 
 		if(VU0.VI[REG_VPU_STAT].UL & 1)

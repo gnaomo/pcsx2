@@ -1396,6 +1396,7 @@ struct Pcsx2Config
 	std::string GzipIsoIndexTemplate; // for quick-access index with gzipped ISO
 
 	int PINESlot;
+	int DebugServerPort; // PCSX2-MCP: TCP port for the JSON debug bridge, per-instance like PINESlot
 
 	int RtcYear;
 	int RtcMonth;
