@@ -10,6 +10,8 @@
 >
 > **⚠️ LLM disclosure:** All of the changes described above were written entirely by an LLM (AI coding assistant) and have **not been reviewed, audited, or verified by the repository owner**. Treat this code as untrusted / unreviewed. It is kept here purely as a personal backup of work-in-progress and is **not intended for upstream contribution or production use**.
 >
+> This DebugServer is the counterpart to **[gnaomo/pcsx2-mcp-server](https://github.com/gnaomo/pcsx2-mcp-server)** — an MCP server that exposes it (and PCSX2's own Pine IPC) as tools for AI coding assistants. See that repo for the client-side setup and full tool list.
+>
 > Everything below this notice is the unmodified upstream PCSX2 README.
 
 # PCSX2
