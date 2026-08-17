@@ -1,3 +1,17 @@
+> ## ⚠️ Fork Notice: LLM-Generated Changes
+>
+> **This fork adds an experimental debug bridge for external tooling (e.g. AI-assisted debugging) on top of upstream PCSX2.**
+>
+> **Added / changed in this fork:**
+> - `pcsx2/DebugTools/DebugServer.{cpp,h}` — a new local TCP/JSON server exposing register access, memory read/write, breakpoints, disassembly, VU0/VU1 state, save-state control, and related debug operations to external tools.
+> - `pcsx2/DebugTools/VUBreakpoints.{cpp,h}` — VU0/VU1 microcode address breakpoints (interpreter-only; not supported under the microVU recompiler — see code comments).
+> - `pcsx2/VMManager.cpp` — starts/stops the debug server alongside the CPU thread, plus temporary diagnostic logging around VU0/VU1 recompiler↔interpreter backend swaps for an in-progress investigation into a VU-breakpoint freeze issue.
+> - Small supporting edits to `CMakeLists.txt`, `Config.h`, `GSCapture.cpp`, `PINE.cpp`, `Pcsx2Config.cpp`, `VU0.cpp`, `VU0microInterp.cpp`, `VU1micro.cpp`, `VU1microInterp.cpp`, `VUmicro.cpp` to wire the above in.
+>
+> **⚠️ LLM disclosure:** All of the changes described above were written entirely by an LLM (AI coding assistant) and have **not been reviewed, audited, or verified by the repository owner**. Treat this code as untrusted / unreviewed. It is kept here purely as a personal backup of work-in-progress and is **not intended for upstream contribution or production use**.
+>
+> Everything below this notice is the unmodified upstream PCSX2 README.
+
 # PCSX2
 
 ![Windows Build Status](https://img.shields.io/github/actions/workflow/status/PCSX2/pcsx2/windows_build_matrix.yml?label=%F0%9F%96%A5%EF%B8%8F%20Windows%20Builds)
