@@ -8,6 +8,7 @@
 #include "Counters.h"
 #include "DEV9/DEV9.h"
 #include "DebugTools/DebugInterface.h"
+#include "DebugTools/DebugServer.h"
 #include "DebugTools/SymbolImporter.h"
 #include "Elfheader.h"
 #include "FW.h"
@@ -425,6 +426,11 @@ bool VMManager::Internal::CPUThreadInitialize()
 
 	ReloadPINE();
 
+	// PCSX2-MCP: start the JSON/TCP debug bridge (127.0.0.1:21512) alongside
+	// the CPU thread so external tools can attach as soon as PCSX2 is up,
+	// independent of whether a game/VM has booted yet.
+	DebugServer::Start(EmuConfig.DebugServerPort);
+
 	if (EmuConfig.EnableDiscordPresence)
 		InitializeDiscordPresence();
 
@@ -438,6 +444,8 @@ bool VMManager::Internal::CPUThreadInitialize()
 void VMManager::Internal::CPUThreadShutdown()
 {
 	ShutdownDiscordPresence();
+
+	DebugServer::Stop();
 
 	PINEServer::Deinitialize();
 
@@ -2714,8 +2722,29 @@ void VMManager::UpdateCPUImplementations()
 	Cpu = CHECK_EEREC ? &recCpu : &intCpu;
 	psxCpu = CHECK_IOPREC ? &psxRec : &psxInt;
 
+	// PCSX2-MCP DEBUG: confirm VU0/VU1 backend swaps actually take effect when
+	// the recompiler settings are toggled. Remove once the VU-breakpoint
+	// freeze investigation is done.
+	BaseVUmicroCPU* const old_vu0 = CpuVU0;
+	BaseVUmicroCPU* const old_vu1 = CpuVU1;
+
 	CpuVU0 = EmuConfig.Cpu.Recompiler.EnableVU0 ? static_cast<BaseVUmicroCPU*>(&CpuMicroVU0) : static_cast<BaseVUmicroCPU*>(&CpuIntVU0);
 	CpuVU1 = EmuConfig.Cpu.Recompiler.EnableVU1 ? static_cast<BaseVUmicroCPU*>(&CpuMicroVU1) : static_cast<BaseVUmicroCPU*>(&CpuIntVU1);
+
+	if (old_vu0 != CpuVU0)
+	{
+		Console.WriteLnFmt("[PCSX2-MCP DEBUG] CpuVU0 switched: {} -> {} (EnableVU0={})",
+			old_vu0 == static_cast<BaseVUmicroCPU*>(&CpuMicroVU0) ? "recompiler" : (old_vu0 == static_cast<BaseVUmicroCPU*>(&CpuIntVU0) ? "interpreter" : "null/other"),
+			CpuVU0 == static_cast<BaseVUmicroCPU*>(&CpuMicroVU0) ? "recompiler" : "interpreter",
+			static_cast<bool>(EmuConfig.Cpu.Recompiler.EnableVU0));
+	}
+	if (old_vu1 != CpuVU1)
+	{
+		Console.WriteLnFmt("[PCSX2-MCP DEBUG] CpuVU1 switched: {} -> {} (EnableVU1={})",
+			old_vu1 == static_cast<BaseVUmicroCPU*>(&CpuMicroVU1) ? "recompiler" : (old_vu1 == static_cast<BaseVUmicroCPU*>(&CpuIntVU1) ? "interpreter" : "null/other"),
+			CpuVU1 == static_cast<BaseVUmicroCPU*>(&CpuMicroVU1) ? "recompiler" : "interpreter",
+			static_cast<bool>(EmuConfig.Cpu.Recompiler.EnableVU1));
+	}
 #else
 	Cpu = &intCpu;
 	psxCpu = &psxInt;

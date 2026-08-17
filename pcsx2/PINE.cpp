@@ -473,9 +473,17 @@ void PINEServer::ClientLoop()
 		{
 			res = ParseCommand(ipc_buffer_span.subspan(4), s_ret_buffer, (u32)end_length - 4);
 
-			// if we cannot send back our answer restart the socket
-			if (write_portable(s_msgsock, res.buffer.data(), res.size) < 0)
-				return;
+			// a single write() isn't guaranteed to send the whole reply for
+			// big batch replies, so loop until it's all sent
+			int sent = 0;
+			while (sent < res.size)
+			{
+				const auto tmp_sent = write_portable(s_msgsock, res.buffer.data() + sent, res.size - sent);
+				// if we cannot send back our answer restart the socket
+				if (tmp_sent <= 0)
+					return;
+				sent += (int)tmp_sent;
+			}
 		}
 	}
 }
@@ -499,6 +507,21 @@ void PINEServer::Deinitialize()
 #else
 	if (s_sock >= 0)
 		shutdown(s_sock, SHUT_RDWR);
+#endif
+
+	// PCSX2-MCP fix: close()ing s_msgsock from this thread does not wake a
+	// peer thread blocked in read() on the same fd (Linux semantics) - only
+	// shutdown() reliably does. Without this, an idle-but-open PINE client
+	// (e.g. one that connected then went quiet) leaves ClientLoop() parked in
+	// read() forever, so s_thread.join() below never returns and the whole
+	// CPU thread shutdown sequence hangs. Same root cause/fix as
+	// DebugServer::Stop()'s s_clientSockets handling.
+#ifdef _WIN32
+	if (s_msgsock != INVALID_SOCKET)
+		shutdown(s_msgsock, SD_BOTH);
+#else
+	if (s_msgsock >= 0)
+		shutdown(s_msgsock, SHUT_RDWR);
 #endif
 
 	safe_close_portable(s_sock);

@@ -8,6 +8,8 @@
 #include <cmath>
 #include "VUmicro.h"
 #include "MTVU.h"
+#include "VMManager.h"
+#include "DebugTools/VUBreakpoints.h"
 
 #ifdef PCSX2_DEBUG
 u32 vudump = 0;
@@ -35,6 +37,26 @@ void vu1Finish(bool add_cycles) {
 	if(VU0.VI[REG_VPU_STAT].UL & 0x100) {
 		VUM_LOG("vu1ExecMicro > Stalling until current microprogram finishes");
 		CpuVU1->Execute(vu1RunCycles);
+
+		// See the matching comment in VU0.cpp's _vu0run(): a VU1 breakpoint can
+		// only be detected inside CpuVU1->Execute() itself, which just returned
+		// to us here - past its own RAII guards, so this is the first safe
+		// place to actually pause. We're guaranteed off the MTVU thread at this
+		// point (the `if (THREAD_VU1) { ...; return; }` above already handled
+		// that case), so Cpu->ExitExecution() is safe/valid here exactly as it
+		// is for VU0.
+		if (VUBreakpoints::WasTriggered())
+		{
+			VUBreakpoints::ClearTriggered();
+			VMManager::SetPaused(true);
+			// Deliberately not calling Cpu->ExitExecution() - see the detailed
+			// comment in VU0.cpp's _vu0run() for why: it corrupts EE recompiler
+			// exit-state bookkeeping when called from a non-designated call
+			// site, causing a permanent freeze after the first pause/resume
+			// cycle (confirmed by testing). A single SetPaused(true) is enough;
+			// the recompiler's own existing periodic checkpoint picks it up
+			// shortly after, same as the normal UI Pause button.
+		}
 	}
 	if (VU0.VI[REG_VPU_STAT].UL & 0x100) {
 		DevCon.Warning("Force Stopping VU1, ran for too long");
@@ -74,9 +96,20 @@ void vu1ExecMicro(u32 addr)
 	CpuVU1->SetStartPC(VU1.VI[REG_TPC].UL << 3);
 	_vuExecMicroDebug(VU1);
 	if(!INSTANT_VU1)
-		CpuVU1->ExecuteBlock(1);
+		CpuVU1->ExecuteBlock(1); // recompiler path - VU breakpoints never fire here, see VUBreakpoints.h
 	else
 		CpuVU1->Execute(vu1RunCycles);
+
+	// See the comment in vu1Finish() above - same reasoning, same guarantee
+	// of not being on the MTVU thread here (the THREAD_VU1 branch at the top
+	// of this function already returned before reaching this point).
+	if (VUBreakpoints::WasTriggered())
+	{
+		VUBreakpoints::ClearTriggered();
+		VMManager::SetPaused(true);
+		// Same reasoning as vu1Finish() and VU0.cpp's _vu0run() - deliberately
+		// not calling Cpu->ExitExecution() here.
+	}
 }
 
 void MTVUInterrupt()

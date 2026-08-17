@@ -807,11 +807,14 @@ set(pcsx2DebugToolsSources
 	DebugTools/DisR5900asm.cpp
 	DebugTools/DisVU0Micro.cpp
 	DebugTools/DisVU1Micro.cpp
-	DebugTools/BiosDebugData.cpp)
+	DebugTools/BiosDebugData.cpp
+	DebugTools/DebugServer.cpp
+	DebugTools/VUBreakpoints.cpp)
 
 # DebugTools headers
 set(pcsx2DebugToolsHeaders
 	DebugTools/DebugInterface.h
+	DebugTools/DebugServer.h
 	DebugTools/DisassemblyManager.h
 	DebugTools/ExpressionParser.h
 	DebugTools/MIPSAnalyst.h
@@ -825,7 +828,8 @@ set(pcsx2DebugToolsHeaders
 	DebugTools/DisASM.h
 	DebugTools/DisVUmicro.h
 	DebugTools/DisVUops.h
-	DebugTools/BiosDebugData.h)
+	DebugTools/BiosDebugData.h
+	DebugTools/VUBreakpoints.h)
 
 set(pcsx2HostSources
 	Host/AudioStream.cpp
