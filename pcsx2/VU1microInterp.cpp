@@ -7,6 +7,9 @@
 #include "GS.h"
 #include "Gif_Unit.h"
 #include "MTVU.h"
+#include "VMManager.h"
+
+#include "DebugTools/VUBreakpoints.h"
 
 #include <cfenv>
 
@@ -274,6 +277,33 @@ void InterpVU1::Execute(u32 cycles)
 			}
 			break;
 		}
+
+		// VU-side breakpoint check (VUBreakpoints.h) - see the matching comment
+		// in VU0microInterp.cpp's InterpVU0::Execute(). Note this only covers
+		// VU1 running on this (the calling) thread; when Multi-Threaded VU1
+		// (MTVU) is enabled, VU1's interpreter runs on its own "VU" thread
+		// instead - this check still runs there too (it's on the path that
+		// executes regardless of which thread called Execute()), but be aware
+		// the resulting pause is then crossing threads. Masked with
+		// VU1_PROGMASK to match what Step() itself does to TPC as its first
+		// line - our check runs before that, so it needs to replicate it or a
+		// wrapped TPC could compare against an out-of-range address and never
+		// hit.
+		if (VUBreakpoints::Check(1, VU1.VI[REG_TPC].UL & VU1_PROGMASK))
+		{
+			// See the matching comment in VU0microInterp.cpp's InterpVU0::Execute()
+			// for why this must NOT call VMManager::SetPaused()/Cpu->ExitExecution()
+			// from here: this function is nested deep in the caller's stack and
+			// holds its own RAII guard that needs to unwind normally first. The
+			// actual pause happens one level up once this call has returned - see
+			// vu1Finish()/vu1ExecMicro() in VU1micro.cpp. (Under MTVU, VU1 runs on
+			// its own thread rather than the EE CPU thread - see the header's MTVU
+			// caveat - so ExitExecution() specifically is only attempted when we're
+			// not on that thread; VUBreakpoints::Check() itself is thread-safe
+			// either way.)
+			break;
+		}
+
 		Step();
 	}
 	VU1.VI[REG_TPC].UL >>= 3;

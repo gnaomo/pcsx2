@@ -4,6 +4,9 @@
 #include "Common.h"
 
 #include "VUmicro.h"
+#include "VMManager.h"
+
+#include "DebugTools/VUBreakpoints.h"
 
 #include <cfenv>
 
@@ -250,6 +253,13 @@ void InterpVU0::Execute(u32 cycles)
 {
 	const FPControlRegisterBackup fpcr_backup(EmuConfig.Cpu.VU0FPCR);
 
+	// PCSX2-MCP DEBUG: live heartbeat so a single abnormally-long Execute() call
+	// (e.g. a VU0 microprogram that never sets its E-bit) shows up in the log
+	// WHILE it's happening, not just after it finally returns. Remove once the
+	// freeze investigation is done.
+	u32 debug_heartbeat_counter = 0;
+	constexpr u32 DEBUG_HEARTBEAT_INTERVAL = 2000000;
+
 	VU0.VI[REG_TPC].UL <<= 3;
 	VU0.flags &= ~VUFLAG_MFLAGSET;
 	u64 startcycles = VU0.cycle;
@@ -268,7 +278,48 @@ void InterpVU0::Execute(u32 cycles)
 		if (VU0.flags & VUFLAG_MFLAGSET)
 			break;
 
+		// VU-side breakpoint check (VUBreakpoints.h) - only reachable while
+		// VU0 is running interpreted, which is exactly the case we're in
+		// here (InterpVU0::Execute). TPC is still left-shifted by 3 at this
+		// point (see the `<<= 3` above), i.e. already a byte offset matching
+		// what VUBreakpoints::Add() expects. Masked with VU0_PROGMASK to match
+		// what vu0Exec() itself does to TPC one line into its own call - our
+		// check runs before that, so it needs to replicate it or a wrapped
+		// TPC could compare against an out-of-range address and never hit.
+		if (VUBreakpoints::Check(0, VU0.VI[REG_TPC].UL & VU0_PROGMASK))
+		{
+			// Do NOT call VMManager::SetPaused()/Cpu->ExitExecution() from here.
+			// This function is deeply nested inside the recompiled EE call stack
+			// (recExecute -> ... -> VCALLMS -> _vu0FinishMicro -> _vu0run -> here)
+			// and holds its own RAII guard (fpcr_backup, above) that must be
+			// allowed to unwind normally first - fastjmp'ing past it here would
+			// skip its destructor and leave the wrong FP control register (MXCSR)
+			// active for all subsequent EE math. VUBreakpoints::Check() already
+			// latched s_triggered; the actual pause + safe stack unwind happens
+			// one level up, in _vu0run() (VU0.cpp), once this call has returned
+			// and that guard's destructor has already run.
+			//
+			// PCSX2-MCP FIX: mirror the E-Bit-finished branch above - if a branch
+			// was pending in the delay slot when this breakpoint hit, resolve it
+			// now rather than leaving VU0.branch/branchpc stale. Otherwise the
+			// *next* Execute() call (after resume) can start from an unresolved
+			// branch state, which was a plausible source of the post-resume
+			// infinite loops seen during the freeze investigation.
+			if (VU0.branch)
+			{
+				VU0.VI[REG_TPC].UL = VU0.branchpc;
+				VU0.branch = 0;
+			}
+			break;
+		}
+
 		vu0Exec(&VU0);
+
+		if ((++debug_heartbeat_counter % DEBUG_HEARTBEAT_INTERVAL) == 0)
+		{
+			Console.WriteLnFmt("[PCSX2-MCP DEBUG] InterpVU0::Execute() heartbeat: {} instructions so far this call, TPC=0x{:04X}, VPU_STAT=0x{:X}, cyclesSoFar={}/{}",
+				debug_heartbeat_counter, VU0.VI[REG_TPC].UL, VU0.VI[REG_VPU_STAT].UL, (VU0.cycle - startcycles), cycles);
+		}
 	}
 	VU0.VI[REG_TPC].UL >>= 3;
 
